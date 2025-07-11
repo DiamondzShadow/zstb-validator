@@ -1,0 +1,4 @@
+node_modules/
+.env
+*.log
+previous_stats.json
