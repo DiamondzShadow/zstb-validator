@@ -1,67 +1,112 @@
 const { ethers } = require('ethers');
 const { google } = require('googleapis');
-const fs         = require('fs');
-const path       = require('path');
+const admin = require('firebase-admin');
+
+// Initialize Firebase Admin using default GCP credentials
+admin.initializeApp({
+  credential: admin.credential.applicationDefault()
+});
+
+const db = admin.firestore();
 
 class YouTubeValidator {
-  constructor(){
-    // blockchain setup
+  constructor() {
+    // RPC + Wallet
     this.provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
-    this.wallet   = new ethers.Wallet(process.env.PRIVATE_KEY, this.provider);
+    this.wallet = new ethers.Wallet(process.env.PRIVATE_KEY, this.provider);
 
-    // load the artifact and pull out .abi
+    // Load ABI
     const artifact = require('./abi.json');
-    const abi      = artifact.abi;
-    this.contract  = new ethers.Contract(
+    const abi = artifact.abi || artifact;
+    this.contract = new ethers.Contract(
       process.env.CONTRACT_ADDRESS,
       abi,
       this.wallet
     );
 
-    // YouTube API setup
-    this.youtube   = google.youtube({ version:'v3', auth: process.env.YOUTUBE_API_KEY });
+    // YouTube API
+    this.youtube = google.youtube({
+      version: 'v3',
+      auth: process.env.YOUTUBE_API_KEY
+    });
+
     this.channelId = process.env.YOUTUBE_CHANNEL_ID;
-    this.stateFile = path.resolve(__dirname, '..', 'previous_stats.json');
+    this.stateRef = db.collection('youtubeValidators').doc(this.channelId);
   }
 
-  async fetchStats(){
+  async loadPreviousStats() {
+    const doc = await this.stateRef.get();
+    return doc.exists ? doc.data() : { views: 0, subscribers: 0 };
+  }
+
+  async saveStats(stats) {
+    await this.stateRef.set(stats);
+  }
+
+  async fetchStats() {
     const res = await this.youtube.channels.list({
-      part:   'statistics',
-      id:     this.channelId,
+      part: 'statistics',
+      id: this.channelId,
       fields: 'items(statistics(viewCount,subscriberCount))'
     });
+
     const st = res.data.items?.[0]?.statistics || {};
-    return { views: Number(st.viewCount||0), subscribers: Number(st.subscriberCount||0) };
+    return {
+      views: Number(st.viewCount || 0),
+      subscribers: Number(st.subscriberCount || 0)
+    };
   }
 
-  loadPreviousStats(){
-    try { return JSON.parse(fs.readFileSync(this.stateFile)); }
-    catch { return {views:0,subscribers:0}; }
-  }
-
-  saveStats(stats){
-    fs.writeFileSync(this.stateFile, JSON.stringify(stats,null,2));
-  }
-
-  async validateAndMint(){
-    const prev = this.loadPreviousStats();
+  async validateAndMint() {
+    const prev = await this.loadPreviousStats();
     const curr = await this.fetchStats();
 
-    const deltaSubs  = curr.subscribers - prev.subscribers;
-    const deltaViews = curr.views       - prev.views;
-    const toMint     = Math.floor(deltaSubs/10)*100 + Math.floor(deltaViews/20)*5;
+    const deltaSubs = curr.subscribers - prev.subscribers;
+    const deltaViews = curr.views - prev.views;
+    const toMint = Math.floor(deltaSubs / 10) * 100 + Math.floor(deltaViews / 20) * 5;
+
+    console.log(`📊 Current:     ${curr.subscribers} subs / ${curr.views} views`);
+    console.log(`📉 Previous:    ${prev.subscribers} subs / ${prev.views} views`);
+    console.log(`🧮 Delta:       +${deltaSubs} subs / +${deltaViews} views`);
+    console.log(`🔢 To Mint:     ${toMint} zsTB`);
 
     if (toMint <= 0) {
-      console.log('Nothing to mint.');
+      console.log('🚫 Nothing to mint.');
       return;
     }
 
-    console.log('Minting', toMint, 'tokens...');
-    const tx = await this.contract.mint(process.env.RECIPIENT_ADDRESS, toMint);
-    await tx.wait();
-    console.log('Tx hash:', tx.hash);
+    try {
+      console.log(`🪙 Minting ${toMint} zsTB to ${process.env.RECIPIENT_ADDRESS}...`);
+      const tx = await this.contract.mintFromOracle(
+        process.env.RECIPIENT_ADDRESS,
+        toMint,
+        this.channelId,
+        'Auto-Oracle',
+        deltaViews,
+        deltaSubs
+      );
+      await tx.wait();
+      console.log('✅ Tx Hash:', tx.hash);
 
-    this.saveStats(curr);
+      // Save latest stats
+      await this.saveStats(curr);
+
+      // Log mint to subcollection
+      await this.stateRef.collection('mints').add({
+        timestamp: new Date(),
+        to: process.env.RECIPIENT_ADDRESS,
+        minted: toMint,
+        deltaViews,
+        deltaSubs,
+        prev,
+        curr,
+        txHash: tx.hash
+      });
+
+      console.log('📥 Mint logged in Firestore.');
+    } catch (err) {
+      console.error('❌ Mint failed:', err.message);
+    }
   }
 }
 
