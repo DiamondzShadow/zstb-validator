@@ -1,19 +1,22 @@
-Below is a **complete, Docker-centric README.md** you can drop straight into the repo.
+**updated `README.md`** with Firestore logic and current minting behavior — while keeping your Docker-based deployment flow intact:
 
-````markdown
+---
+
+````md
 # zsTB YouTube Validator 🪄
 
-A slim Node.js service that:
+A slim Node.js oracle that:
 
-1. Pulls **view & subscriber counts** from YouTube,  
-2. Calculates deltas since last run,  
-3. Mints **zsTB** ERC-20 tokens on your chain.
+1. Pulls **view & subscriber counts** from YouTube  
+2. Calculates deltas since last run (stored in Firestore)  
+3. Mints **zsTB** ERC-20 tokens on your chain  
+4. Stores **mint history** in Firestore `/mints/` subcollection
 
 Runs **once at boot** and **every hour** thereafter.
 
 ---
 
-## ⚡ Quick Start (100 % Docker)
+## ⚡ Quick Start (100% Docker)
 
 ```bash
 # clone
@@ -23,11 +26,11 @@ cd zstb-validator
 # build image
 docker build -t zstb-validator .
 
-# create .env (template below) and fill your values
+# copy env config and fill in values
 cp .env.example .env
 nano .env
 
-# run detached, auto-restarts on crash / reboot
+# run in background and auto-restart
 docker run -d --name zstb-validator \
   --env-file .env \
   -p 3000:3000 \
@@ -35,60 +38,91 @@ docker run -d --name zstb-validator \
   zstb-validator
 ````
 
-| Check           | Command / URL                                                |
-| --------------- | ------------------------------------------------------------ |
-| Health endpoint | `curl http://localhost:3000` → `OK`                          |
-| Live logs       | `docker logs -f zstb-validator`                              |
-| Stop / start    | `docker stop zstb-validator` / `docker start zstb-validator` |
+| Check       | Command                             |
+| ----------- | ----------------------------------- |
+| Healthcheck | `curl http://localhost:3000` → `OK` |
+| Live logs   | `docker logs -f zstb-validator`     |
+| Restart     | `docker restart zstb-validator`     |
 
 ---
 
-## 🔑 Environment Variables
-
-Create `.env` (or secret store) with:
+## 🔑 .env Configuration
 
 ```dotenv
 # Blockchain
-RPC_URL=https://YOUR-RPC
-PRIVATE_KEY=0xYOUR_ORACLE_PK
-CONTRACT_ADDRESS=0xYOUR_ZSTB_TOKEN
-RECIPIENT_ADDRESS=0xWHERE_MINT_GOES
+RPC_URL=https://your-rpc-url
+PRIVATE_KEY=0x_your_oracle_wallet_private_key
+CONTRACT_ADDRESS=0x_zstb_token_contract
+RECIPIENT_ADDRESS=0x_where_to_mint_tokens
 
 # YouTube API
 YOUTUBE_API_KEY=AIzaSyEXAMPLE
 YOUTUBE_CHANNEL_ID=UCxxxxxxxxxxxxxxxxx
 
 # Optional
-PORT=3000          # health-check port
+PORT=3000
 ```
 
-> **Never** commit the real `.env`. It’s in `.gitignore`.
+---
+
+## 🎬 YouTube API Setup
+
+* Go to Google Cloud Console
+* Enable `YouTube Data API v3`
+* Create API Key and restrict it to:
+
+  * Application: IP / referrer
+  * API: `YouTube Data API v3`
 
 ---
 
-## 🎬 Google API – YouTube Data v3
+## 🔥 Firestore Setup
 
-1. Open **Google Cloud Console**.
-2. **Enable** ➜ *YouTube Data API v3*.
-3. \**Credentials → Create API key*.
-4. (Recommended) **Restrict** it:
+This oracle now **uses Firestore** instead of local JSON files.
 
-   * *Application restriction*: your server IP **or** HTTP referrer.
-   * *API restriction*: YouTube Data API v3 only.
-5. Paste the key into `YOUTUBE_API_KEY` above.
+**Collection structure:**
+
+```
+/youtubeValidators/{channelId}
+/youtubeValidators/{channelId}/mints/{timestamp}
+```
+
+**Requirements:**
+
+* Firestore API enabled in Google Cloud
+* Oracle running on a GCP VM (uses `applicationDefault()` auth)
+* Firestore rules should allow read/write (see below)
+
+```js
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if
+        request.time < timestamp.date(2025, 8, 7);
+    }
+  }
+}
+```
 
 ---
 
-## 📦 Runtime Dependencies (auto-installed)
+## 🧠 Mint Logic
 
-| Package        | Why                             |
-| -------------- | ------------------------------- |
-| **ethers**     | Contract calls & wallet signing |
-| **googleapis** | Official YouTube client         |
-| **dotenv**     | Loads `.env` secrets            |
-| **node-cron**  | Hourly scheduler                |
+```txt
++100 zsTB per 10 new subscribers  
+ +  5 zsTB per 20 new views
 
-Docker and `npm ci` install these automatically—nothing extra to do.
+→ Stats are stored in Firestore  
+→ Mint history is saved under `/mints/`  
+→ Prevents duplicate mints
+```
+
+You can adjust the logic in:
+
+```js
+validator/youtube-validator.js → `calculateMintAmount()`
+```
 
 ---
 
@@ -96,23 +130,23 @@ Docker and `npm ci` install these automatically—nothing extra to do.
 
 ```
 .
-├── index.js              # boot + cron(0 * * * *) ➜ run()
+├── index.js                  # boot + cron(0 * * * *) → run()
 ├── validator/
-│   ├── youtube-validator.js  # core logic
-│   └── abi.json              # **only** the .abi array
-├── package*.json
+│   ├── youtube-validator.js  # core logic with Firestore
+│   └── abi.json              # contract ABI
+├── firebase.js               # Firestore init (uses ADC)
 ├── Dockerfile
-└── previous_stats.json   # auto-generated state
+├── package*.json
+└── .env.example
 ```
 
 ---
 
-## 🔄 CI/CD (totally optional)
+## 🛠 CI/CD (optional)
 
-Push an image to GitHub Container Registry every commit:
+GitHub Actions: `.github/workflows/docker.yml`
 
 ```yaml
-# .github/workflows/docker.yml
 name: Build & Push
 on: [push]
 jobs:
@@ -126,16 +160,19 @@ jobs:
           tags: ghcr.io/<GH_USER>/zstb-validator:latest
 ```
 
-Deploy that image anywhere (`docker run …`).
-
 ---
 
-## 🌍 Production HTTPS (Nginx reverse-proxy)
+## 🌍 HTTPS with Nginx
+
+Install Nginx + Certbot:
 
 ```bash
 sudo apt update && sudo apt install -y nginx certbot python3-certbot-nginx
+```
 
-# /etc/nginx/sites-available/validator
+Example config:
+
+```nginx
 server {
     listen 80;
     server_name validator.example.com;
@@ -156,48 +193,46 @@ server {
         proxy_set_header Connection 'upgrade';
     }
 }
-# enable & reload
+```
+
+Then:
+
+```bash
 sudo ln -s /etc/nginx/sites-available/validator /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
-
-# TLS cert
 sudo certbot --nginx -d validator.example.com
 ```
 
 ---
 
-## 🪙 Mint Logic
+## 🧪 View Results
+
+Use Firebase Hosting or Next.js to visualize:
 
 ```
-• +100 zsTB per 10 new subscribers
-•  +5 zsTB per 20 new views
+/youtubeValidators/{channelId}
+  → views, subscribers, latest deltas
+/youtubeValidators/{channelId}/mints/
+  → timestamped mint records
 ```
-
-Adjust in `validator/youtube-validator.js` → `toMint` formula.
-Cron expression in `index.js` if you want faster/slower cadence.
 
 ---
 
 ## 🔒 Best Practices
 
-1. **Hot-wallet** only—fund with pocket change.
-2. Lock `YOUTUBE_API_KEY` to your server IP / domain.
-3. Expose **only** Nginx port (443) publicly.
-4. Let Docker auto-restart (`--restart always`) for resilience.
+* Use hot wallet with minimal funds
+* Lock API keys to IP or domain
+* Do not expose anything except port 443
+* Use Docker `--restart always` for resilience
 
 ---
 
-May your subs moon and your gas stay cheap. 🚀
-
-````
-
-**How to use**
+## 🛠 Manual Dev Run
 
 ```bash
-echo "<paste block above>" > README.md
-git add README.md
-git commit -m "Docs: cross-platform, Docker-first README"
-git push
-````
+node index.js
+```
 
-Now any dev—Linux, macOS, or Windows—can clone, fill `.env`, and run with two commands (`docker build` → `docker run`).
+---
+
+Let me know if you want me to `git commit -am "docs: updated Firestore + mint tracking in README"` and push this to GitHub.
