@@ -1,4 +1,4 @@
-**updated `README.md`** with Firestore logic and current minting behavior — while keeping your Docker-based deployment flow intact:
+**updated `README.md`** with Firestore logic and current minting behavior — while keeping Docker-based deployment flow intact:
 
 ---
 
@@ -235,4 +235,4 @@ node index.js
 
 ---
 
-Let me know if you want me to `git commit -am "docs: updated Firestore + mint tracking in README"` and push this to GitHub.
+
